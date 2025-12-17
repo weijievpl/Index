@@ -44,12 +44,20 @@
             background: rgba(0, 0, 0, 0.6); border: 1px solid rgba(255, 255, 255, 0.5);
             color: #fff; padding: 10px 15px; border-radius: 20px; font-size: 14px;
             backdrop-filter: blur(4px);
+            cursor: pointer;
         }
         .btn-start { background: #2ed573; border: none; font-weight: bold; }
         .status {
             position: absolute; top: 20%; left: 50%; transform: translateX(-50%);
             color: white; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px;
             text-align: center; z-index: 20; max-width: 80%;
+            display: block;
+        }
+        .loading {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.9); z-index: 100;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            color: white;
         }
     </style>
 </head>
@@ -64,7 +72,7 @@
 
     <div id="status-box" class="status">
         <h3>准备就绪</h3>
-        <p>点击“🚀 启动”开始</p>
+        <p>点击"🚀 启动"开始</p>
         <small>请保持手在画面内，光线充足</small>
     </div>
 
@@ -79,6 +87,16 @@
         </label>
     </div>
 
+    <!-- 加载动画 -->
+    <div id="loadingScreen" class="loading">
+        <h2>加载中...</h2>
+        <p>正在初始化 AI 模型</p>
+        <p id="loadingText">请稍候，首次加载需下载约20MB资源</p>
+        <div style="width: 200px; height: 4px; background: #333; margin-top: 20px; border-radius: 2px;">
+            <div id="loadingBar" style="width: 0%; height: 100%; background: #2ed573; border-radius: 2px; transition: width 0.3s;"></div>
+        </div>
+    </div>
+
 <script>
     const videoElement = document.getElementById('video-bg');
     const pCanvas = document.getElementById('particle-canvas');
@@ -86,6 +104,13 @@
     const sCanvas = document.getElementById('skeleton-canvas');
     const sCtx = sCanvas.getContext('2d');
     const statusBox = document.getElementById('status-box');
+    const loadingScreen = document.getElementById('loadingScreen');
+    const loadingBar = document.getElementById('loadingBar');
+    const loadingText = document.getElementById('loadingText');
+
+    // 检测设备类型
+    const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+    const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
 
     // 适配屏幕
     function resize() {
@@ -99,7 +124,14 @@
     let particles = [];
     let isCameraRunning = false;
     let currentFacingMode = 'user'; // 'user' 前置, 'environment' 后置
-    let gap = window.innerWidth < 600 ? 5 : 3; // 手机端粒子密度
+    
+    // 根据设备调整粒子密度
+    let gap;
+    if (isMobile) {
+        gap = window.innerWidth < 600 ? 8 : 6; // 手机端粒子密度适中
+    } else {
+        gap = 3; // 桌面端高密度
+    }
 
     // 手势状态
     const handState = {
@@ -115,18 +147,45 @@
         return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
     }});
 
+    // 设置加载进度
+    let loadProgress = 0;
+    const progressInterval = setInterval(() => {
+        if (loadProgress < 90) {
+            loadProgress += 10;
+            loadingBar.style.width = `${loadProgress}%`;
+            loadingText.textContent = `正在下载 AI 模型... ${loadProgress}%`;
+        }
+    }, 300);
+
     hands.setOptions({
         maxNumHands: 1,
-        modelComplexity: 1, // 1=均衡，0=最快。如果手机卡顿请改为0
-        minDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.5
+        modelComplexity: 0, // ⭐ 0=最快模式，移动设备必须
+        minDetectionConfidence: 0.4, // ⭐ 降低检测阈值
+        minTrackingConfidence: 0.4,   // ⭐ 降低跟踪阈值
+        selfieMode: true // 自拍模式优化
     });
 
     hands.onResults(onResults);
 
-    // --- 2. 摄像头控制 (核心修复部分) ---
+    // 模型加载完成
+    hands.initialize().then(() => {
+        clearInterval(progressInterval);
+        loadingBar.style.width = '100%';
+        loadingText.textContent = 'AI 模型加载完成！';
+        setTimeout(() => {
+            loadingScreen.style.display = 'none';
+            statusBox.style.display = 'block';
+        }, 500);
+    }).catch(err => {
+        console.error('AI模型加载失败:', err);
+        loadingText.innerHTML = '❌ AI模型加载失败<br>请刷新页面重试';
+        loadingText.style.color = '#ff6b6b';
+    });
+
+    // --- 2. 摄像头控制 (移动端优化) ---
     async function startCamera() {
-        statusBox.innerHTML = "⌛ 正在启动 AI 模型...<br>请稍候...";
+        statusBox.innerHTML = "⌛ 正在启动摄像头...<br>请稍候...";
+        statusBox.style.display = 'block';
         
         // 停止之前的流
         if (videoElement.srcObject) {
@@ -134,27 +193,78 @@
         }
 
         // 调整镜像：前置需要镜像，后置不需要
-        videoElement.style.transform = currentFacingMode === 'user' ? 'scaleX(-1)' : 'scaleX(1)';
-
+        const isFrontCamera = currentFacingMode === 'user';
+        videoElement.style.transform = isFrontCamera ? 'scaleX(-1)' : 'scaleX(1)';
+        
         try {
-            // 使用 CameraUtils 能够更稳定地控制帧率
-            const camera = new Camera(videoElement, {
-                onFrame: async () => {
-                    await hands.send({image: videoElement});
-                },
-                width: 640,  // 强制降低分辨率，极大提升检测成功率！
-                height: 480,
-                facingMode: currentFacingMode
+            // 移动设备专用配置
+            const constraints = {
+                video: {
+                    facingMode: currentFacingMode,
+                    width: isMobile ? { ideal: 480, max: 640 } : { ideal: 640 },
+                    height: isMobile ? { ideal: 360, max: 480 } : { ideal: 480 },
+                    frameRate: isMobile ? { ideal: 15, max: 30 } : { ideal: 30 }
+                }
+            };
+            
+            // 获取摄像头权限
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            videoElement.srcObject = stream;
+            
+            // 等待视频就绪
+            await new Promise(resolve => {
+                videoElement.onloadedmetadata = () => {
+                    videoElement.play();
+                    resolve();
+                };
             });
             
-            await camera.start();
             isCameraRunning = true;
-            statusBox.style.display = 'none'; // 成功后隐藏提示
+            
+            // 显示连接成功的提示
+            statusBox.innerHTML = "✅ 摄像头已启动<br>请将手放在画面中央<br>确保光线充足";
+            statusBox.style.backgroundColor = 'rgba(0,0,0,0.7)';
+            
+            // 2秒后隐藏提示
+            setTimeout(() => {
+                statusBox.style.display = 'none';
+            }, 2000);
+            
+            // 开始检测循环
+            detectLoop();
             
         } catch (err) {
-            console.error(err);
-            statusBox.innerHTML = `❌ 错误: ${err.message}<br>请确保使用 HTTPS`;
+            console.error("摄像头错误:", err);
+            let errorMsg = `❌ 摄像头错误: ${err.message || err}<br><br>`;
+            
+            if (err.name === 'NotAllowedError') {
+                errorMsg += "请允许摄像头权限<br>1. 点击地址栏的摄像头图标<br>2. 选择'允许'";
+            } else if (err.name === 'NotFoundError') {
+                errorMsg += "未找到摄像头<br>请检查设备摄像头";
+            } else if (err.name === 'NotReadableError') {
+                errorMsg += "摄像头被占用<br>请关闭其他使用摄像头的应用";
+            } else {
+                errorMsg += "请确保：<br>1. 使用 HTTPS 访问<br>2. 使用 Chrome/Edge/Safari 浏览器<br>3. 检查摄像头是否可用";
+            }
+            
+            statusBox.innerHTML = errorMsg;
             statusBox.style.backgroundColor = 'rgba(200,0,0,0.8)';
+        }
+    }
+
+    // 检测循环函数
+    async function detectLoop() {
+        if (!isCameraRunning) return;
+        
+        try {
+            // 发送当前帧到 MediaPipe
+            await hands.send({image: videoElement});
+            
+            // 移动设备上适当降低帧率以节省性能
+            const delay = isMobile ? 100 : 50;
+            setTimeout(detectLoop, delay);
+        } catch (err) {
+            console.error("检测错误:", err);
         }
     }
 
@@ -162,56 +272,139 @@
     function onResults(results) {
         // 清空骨骼画布
         sCtx.clearRect(0, 0, sCanvas.width, sCanvas.height);
-
-        // 如果检测到手
+        
+        // 显示检测状态
         if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            statusBox.style.display = 'none'; // 检测到手时隐藏提示
             const landmarks = results.multiHandLandmarks[0];
-
-            // A. 绘制骨骼 (让你知道它在检测)
-            drawConnectors(sCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
-            drawLandmarks(sCtx, landmarks, {color: '#FF0000', lineWidth: 1, radius: 3});
-
-            // B. 计算食指位置 (用于拨动粒子)
-            // 注意：如果前置摄像头是镜像显示的，坐标也需要镜像计算
-            let ix = landmarks[8].x;
-            if (currentFacingMode === 'user') ix = 1 - ix; // 镜像翻转
+            
+            // A. 绘制骨骼 (用更明显的颜色)
+            sCtx.lineWidth = isMobile ? 4 : 3;
+            sCtx.strokeStyle = '#00FF88';
+            sCtx.fillStyle = '#FF5500';
+            
+            // 绘制连接线
+            if (HAND_CONNECTIONS) {
+                sCtx.beginPath();
+                HAND_CONNECTIONS.forEach(([start, end]) => {
+                    const startPoint = landmarks[start];
+                    const endPoint = landmarks[end];
+                    
+                    if (startPoint && endPoint) {
+                        let startX = startPoint.x * sCanvas.width;
+                        let endX = endPoint.x * sCanvas.width;
+                        
+                        // 镜像处理
+                        if (currentFacingMode === 'user') {
+                            startX = sCanvas.width - startX;
+                            endX = sCanvas.width - endX;
+                        }
+                        
+                        const startY = startPoint.y * sCanvas.height;
+                        const endY = endPoint.y * sCanvas.height;
+                        
+                        sCtx.moveTo(startX, startY);
+                        sCtx.lineTo(endX, endY);
+                    }
+                });
+                sCtx.stroke();
+            }
+            
+            // 绘制关节点
+            landmarks.forEach(point => {
+                let x = point.x * sCanvas.width;
+                const y = point.y * sCanvas.height;
+                
+                // 镜像处理
+                if (currentFacingMode === 'user') {
+                    x = sCanvas.width - x;
+                }
+                
+                sCtx.beginPath();
+                sCtx.arc(x, y, isMobile ? 6 : 5, 0, Math.PI * 2);
+                sCtx.fill();
+            });
+            
+            // B. 计算食指位置
+            const indexFinger = landmarks[8];
+            const indexFingerBase = landmarks[5]; // 食指根部，用于验证
+            
+            // 验证检测质量：食指尖端和根部应该有一定距离
+            const fingerLength = Math.sqrt(
+                Math.pow(indexFinger.x - indexFingerBase.x, 2) + 
+                Math.pow(indexFinger.y - indexFingerBase.y, 2)
+            );
+            
+            // 如果手指长度太短，可能是误检测
+            if (fingerLength < 0.05) {
+                handState.active = false;
+                statusBox.style.display = 'block';
+                statusBox.innerHTML = "🖐️ 手指检测不完整<br>请伸直手指并保持稳定";
+                return;
+            }
+            
+            let ix = indexFinger.x;
+            let iy = indexFinger.y;
+            
+            // 镜像处理
+            if (currentFacingMode === 'user') {
+                ix = 1 - ix; // 水平镜像
+            }
             
             handState.x = ix * pCanvas.width;
-            handState.y = landmarks[8].y * pCanvas.height;
+            handState.y = iy * pCanvas.height;
             handState.active = true;
-
-            // C. 计算手掌张开程度 (五指缩放逻辑)
-            // 算法：计算 指尖(Tip) 到 手腕(Wrist, 0) 的平均距离
+            
+            // C. 计算手掌张开程度 (优化算法)
             const wrist = landmarks[0];
-            const tips = [4, 8, 12, 16, 20]; // 拇指到小指的尖端索引
+            const tips = [4, 8, 12, 16, 20];
             let totalDist = 0;
-
+            let validTips = 0;
+            
             tips.forEach(idx => {
                 const tip = landmarks[idx];
                 const dx = tip.x - wrist.x;
                 const dy = tip.y - wrist.y;
-                totalDist += Math.sqrt(dx*dx + dy*dy);
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                // 忽略异常值
+                if (dist > 0.05 && dist < 0.5) {
+                    totalDist += dist;
+                    validTips++;
+                }
             });
-            const avgDist = totalDist / 5;
-
-            // 调试：你可以 console.log(avgDist) 来看看数值范围
-            // 通常：张开 > 0.35, 握拳 < 0.2 (基于归一化坐标)
             
-            if (avgDist > 0.35) {
-                // 五指张开 -> 放大
-                handState.targetScale = 1.8; 
-            } else if (avgDist < 0.2) {
-                // 五指收缩 -> 缩小
-                handState.targetScale = 0.4;
-            } else {
-                // 正常状态
-                handState.targetScale = 1.0;
+            if (validTips > 3) { // 至少4个有效指尖
+                const avgDist = totalDist / validTips;
+                
+                // 动态阈值调整（适应不同距离）
+                const openThreshold = 0.28 + Math.min(fingerLength * 2, 0.07);
+                const closeThreshold = 0.15 + Math.min(fingerLength * 2, 0.05);
+                
+                if (avgDist > openThreshold) {
+                    handState.targetScale = 1.8; 
+                } else if (avgDist < closeThreshold) {
+                    handState.targetScale = 0.4;
+                } else {
+                    handState.targetScale = 1.0;
+                }
             }
-
+            
         } else {
             handState.active = false;
-            // 如果手移出画面，缓慢恢复原样
             handState.targetScale = 1.0;
+            
+            // 如果检测不到手，显示引导提示
+            if (isCameraRunning) {
+                statusBox.style.display = 'block';
+                statusBox.innerHTML = "👋 等待检测到手<br><br>" +
+                    "使用技巧：<br>" +
+                    "1. 将手放在画面中央<br>" +
+                    "2. 确保光线充足<br>" +
+                    "3. 手势稳定2秒钟<br>" +
+                    "4. 距离摄像头约30-50cm";
+                statusBox.style.backgroundColor = 'rgba(0,0,0,0.7)';
+            }
         }
     }
 
@@ -251,7 +444,7 @@
                 if (dist < 80) { // 感应半径
                     const angle = Math.atan2(dy, dx);
                     const force = (80 - dist) / 80;
-                    const power = 25; // 斥力大小
+                    const power = isMobile ? 20 : 25; // 移动设备上力稍小
                     
                     this.vx -= Math.cos(angle) * force * power;
                     this.vy -= Math.sin(angle) * force * power;
@@ -339,51 +532,132 @@
     });
 
     // --- 动画循环 ---
-    function animate() {
+    let lastFrameTime = 0;
+    const targetFPS = isMobile ? 30 : 60;
+
+    function animate(timestamp) {
+        // 限制移动设备帧率
+        if (isMobile && timestamp - lastFrameTime < 1000 / targetFPS) {
+            requestAnimationFrame(animate);
+            return;
+        }
+        lastFrameTime = timestamp;
+        
         pCtx.clearRect(0, 0, pCanvas.width, pCanvas.height);
-
-        // 平滑过渡缩放值
-        handState.scale += (handState.targetScale - handState.scale) * 0.1;
-
-        particles.forEach(p => {
-            p.update();
-            p.draw();
-        });
-
-        // 绘制食指高亮圈 (仅当检测到且处于交互模式时)
+        
+        // 平滑过渡缩放值（移动设备更平滑）
+        const smoothing = isMobile ? 0.05 : 0.1;
+        handState.scale += (handState.targetScale - handState.scale) * smoothing;
+        
+        // 优化粒子绘制（移动设备分批更新）
+        const batchSize = particles.length;
+        for (let i = 0; i < batchSize; i++) {
+            const p = particles[i];
+            if (p) {
+                p.update();
+                p.draw();
+            }
+        }
+        
+        // 绘制食指高亮圈（仅在检测到时）
         if (handState.active) {
+            // 更明显的交互指示器
             pCtx.beginPath();
-            pCtx.arc(handState.x, handState.y, 20, 0, Math.PI*2);
-            pCtx.strokeStyle = 'white';
+            pCtx.arc(handState.x, handState.y, 25, 0, Math.PI * 2);
+            pCtx.fillStyle = 'rgba(255, 255, 255, 0.2)';
+            pCtx.fill();
+            
+            pCtx.beginPath();
+            pCtx.arc(handState.x, handState.y, 20, 0, Math.PI * 2);
+            pCtx.strokeStyle = '#00FFAA';
             pCtx.lineWidth = 3;
             pCtx.stroke();
             
-            // 显示当前手势状态文字
-            pCtx.fillStyle = 'white';
-            pCtx.font = '16px Arial';
+            // 显示当前手势状态（移动设备上字体更大）
+            pCtx.fillStyle = '#FFFFFF';
+            pCtx.font = isMobile ? '18px Arial' : '16px Arial';
+            pCtx.shadowColor = 'black';
+            pCtx.shadowBlur = 3;
+            
             let txt = "✋ 正常";
             if (handState.targetScale > 1.2) txt = "🖐 张开 (放大)";
             if (handState.targetScale < 0.8) txt = "✊ 握拳 (缩小)";
-            pCtx.fillText(txt, handState.x + 30, handState.y);
+            
+            pCtx.fillText(txt, handState.x + 35, handState.y);
+            pCtx.shadowBlur = 0;
         }
-
+        
         requestAnimationFrame(animate);
     }
 
     // --- 事件绑定 ---
-    document.getElementById('startBtn').addEventListener('click', startCamera);
+    document.getElementById('startBtn').addEventListener('click', async () => {
+        statusBox.innerHTML = "🔄 启动摄像头...";
+        statusBox.style.display = 'block';
+        await startCamera();
+    });
     
     document.getElementById('switchCamBtn').addEventListener('click', () => {
         currentFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
+        // 更新MediaPipe的自拍模式设置
+        hands.setOptions({ selfieMode: currentFacingMode === 'user' });
+        
         // 如果摄像头正在运行，需要重启以应用切换
         if (isCameraRunning) {
             startCamera();
         }
     });
 
+    // 添加页面可见性监听（防止息屏后摄像头失效）
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden && isCameraRunning) {
+            // 页面隐藏时暂停摄像头
+            videoElement.pause();
+        } else if (isCameraRunning) {
+            // 页面恢复时重启摄像头
+            videoElement.play().catch(() => {
+                startCamera();
+            });
+        }
+    });
+
+    // 添加触摸事件支持（移动设备）
+    pCanvas.addEventListener('touchstart', (e) => {
+        if (handState.active) {
+            // 防止页面滚动
+            e.preventDefault();
+        }
+    }, { passive: false });
+
+    // 添加加载完成提示
+    window.addEventListener('load', () => {
+        setTimeout(() => {
+            if (!isCameraRunning) {
+                statusBox.innerHTML = "👆 点击下方绿色按钮启动<br><br>" +
+                    "使用说明：<br>" +
+                    "1. 点击「🚀 启动」<br>" +
+                    "2. 允许摄像头权限<br>" +
+                    "3. 将手放入画面<br>" +
+                    "4. 张开/握拳控制缩放<br>" +
+                    "5. 食指拨动粒子";
+                statusBox.style.display = 'block';
+            }
+        }, 1000);
+    });
+
     // 初始化
     setPattern('text');
     animate();
+
+    // iOS特殊处理
+    if (isIOS) {
+        // iOS需要特殊处理自动播放
+        document.addEventListener('touchstart', () => {
+            if (!isCameraRunning) {
+                videoElement.play().catch(e => console.log('iOS自动播放阻止:', e));
+            }
+        }, { once: true });
+    }
 
 </script>
 </body>

@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>AR 粒子：手势缩放控制</title>
+    
+    <!-- 引入 MediaPipe Hands -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; touch-action: none; }
+        body { background-color: #000; overflow: hidden; font-family: sans-serif; }
+
+        /* 1. 视频背景层 */
+        #video-bg {
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            object-fit: cover; z-index: 0;
+            transform: scaleX(-1); /* 默认镜像 */
+        }
+
+        /* 2. 骨骼调试层 (半透明) */
+        #skeleton-canvas {
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            z-index: 1; pointer-events: none;
+        }
+
+        /* 3. 粒子特效层 */
+        #particle-canvas {
+            position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+            z-index: 2;
+        }
+
+        /* UI */
+        .controls {
+            position: absolute; bottom: 20px; left: 0; width: 100%;
+            display: flex; justify-content: center; flex-wrap: wrap; gap: 8px;
+            z-index: 10;
+        }
+        .btn {
+            background: rgba(0, 0, 0, 0.6); border: 1px solid rgba(255, 255, 255, 0.5);
+            color: #fff; padding: 10px 15px; border-radius: 20px; font-size: 14px;
+            backdrop-filter: blur(4px);
+        }
+        .btn-start { background: #2ed573; border: none; font-weight: bold; }
+        .status {
+            position: absolute; top: 20%; left: 50%; transform: translateX(-50%);
+            color: white; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px;
+            text-align: center; z-index: 20; max-width: 80%;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 视频源 -->
+    <video id="video-bg" playsinline></video>
+    <!-- 骨骼层 -->
+    <canvas id="skeleton-canvas"></canvas>
+    <!-- 粒子层 -->
+    <canvas id="particle-canvas"></canvas>
+
+    <div id="status-box" class="status">
+        <h3>准备就绪</h3>
+        <p>点击“🚀 启动”开始</p>
+        <small>请保持手在画面内，光线充足</small>
+    </div>
+
+    <div class="controls">
+        <button class="btn btn-start" id="startBtn">🚀 启动 / 重试</button>
+        <button class="btn" id="switchCamBtn">🔄 切换镜头</button>
+        <button class="btn" onclick="setPattern('text')">🅰 文字</button>
+        <button class="btn" onclick="setPattern('heart')">❤ 心形</button>
+        <label class="btn">
+            🖼 导入
+            <input type="file" id="imgUpload" accept="image/*" style="display:none">
+        </label>
+    </div>
+
+<script>
+    const videoElement = document.getElementById('video-bg');
+    const pCanvas = document.getElementById('particle-canvas');
+    const pCtx = pCanvas.getContext('2d');
+    const sCanvas = document.getElementById('skeleton-canvas');
+    const sCtx = sCanvas.getContext('2d');
+    const statusBox = document.getElementById('status-box');
+
+    // 适配屏幕
+    function resize() {
+        pCanvas.width = sCanvas.width = window.innerWidth;
+        pCanvas.height = sCanvas.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // --- 全局状态 ---
+    let particles = [];
+    let isCameraRunning = false;
+    let currentFacingMode = 'user'; // 'user' 前置, 'environment' 后置
+    let gap = window.innerWidth < 600 ? 5 : 3; // 手机端粒子密度
+
+    // 手势状态
+    const handState = {
+        x: -1000, y: -1000, // 食指位置
+        active: false,
+        spread: 0, // 张开程度
+        scale: 1, // 当前粒子缩放倍率
+        targetScale: 1 // 目标缩放倍率
+    };
+
+    // --- 1. MediaPipe AI 初始化 ---
+    const hands = new Hands({locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+    }});
+
+    hands.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1, // 1=均衡，0=最快。如果手机卡顿请改为0
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    hands.onResults(onResults);
+
+    // --- 2. 摄像头控制 (核心修复部分) ---
+    async function startCamera() {
+        statusBox.innerHTML = "⌛ 正在启动 AI 模型...<br>请稍候...";
+        
+        // 停止之前的流
+        if (videoElement.srcObject) {
+            videoElement.srcObject.getTracks().forEach(t => t.stop());
+        }
+
+        // 调整镜像：前置需要镜像，后置不需要
+        videoElement.style.transform = currentFacingMode === 'user' ? 'scaleX(-1)' : 'scaleX(1)';
+
+        try {
+            // 使用 CameraUtils 能够更稳定地控制帧率
+            const camera = new Camera(videoElement, {
+                onFrame: async () => {
+                    await hands.send({image: videoElement});
+                },
+                width: 640,  // 强制降低分辨率，极大提升检测成功率！
+                height: 480,
+                facingMode: currentFacingMode
+            });
+            
+            await camera.start();
+            isCameraRunning = true;
+            statusBox.style.display = 'none'; // 成功后隐藏提示
+            
+        } catch (err) {
+            console.error(err);
+            statusBox.innerHTML = `❌ 错误: ${err.message}<br>请确保使用 HTTPS`;
+            statusBox.style.backgroundColor = 'rgba(200,0,0,0.8)';
+        }
+    }
+
+    // --- 3. AI 结果处理 & 手势逻辑 ---
+    function onResults(results) {
+        // 清空骨骼画布
+        sCtx.clearRect(0, 0, sCanvas.width, sCanvas.height);
+
+        // 如果检测到手
+        if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+            const landmarks = results.multiHandLandmarks[0];
+
+            // A. 绘制骨骼 (让你知道它在检测)
+            drawConnectors(sCtx, landmarks, HAND_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
+            drawLandmarks(sCtx, landmarks, {color: '#FF0000', lineWidth: 1, radius: 3});
+
+            // B. 计算食指位置 (用于拨动粒子)
+            // 注意：如果前置摄像头是镜像显示的，坐标也需要镜像计算
+            let ix = landmarks[8].x;
+            if (currentFacingMode === 'user') ix = 1 - ix; // 镜像翻转
+            
+            handState.x = ix * pCanvas.width;
+            handState.y = landmarks[8].y * pCanvas.height;
+            handState.active = true;
+
+            // C. 计算手掌张开程度 (五指缩放逻辑)
+            // 算法：计算 指尖(Tip) 到 手腕(Wrist, 0) 的平均距离
+            const wrist = landmarks[0];
+            const tips = [4, 8, 12, 16, 20]; // 拇指到小指的尖端索引
+            let totalDist = 0;
+
+            tips.forEach(idx => {
+                const tip = landmarks[idx];
+                const dx = tip.x - wrist.x;
+                const dy = tip.y - wrist.y;
+                totalDist += Math.sqrt(dx*dx + dy*dy);
+            });
+            const avgDist = totalDist / 5;
+
+            // 调试：你可以 console.log(avgDist) 来看看数值范围
+            // 通常：张开 > 0.35, 握拳 < 0.2 (基于归一化坐标)
+            
+            if (avgDist > 0.35) {
+                // 五指张开 -> 放大
+                handState.targetScale = 1.8; 
+            } else if (avgDist < 0.2) {
+                // 五指收缩 -> 缩小
+                handState.targetScale = 0.4;
+            } else {
+                // 正常状态
+                handState.targetScale = 1.0;
+            }
+
+        } else {
+            handState.active = false;
+            // 如果手移出画面，缓慢恢复原样
+            handState.targetScale = 1.0;
+        }
+    }
+
+    // --- 4. 粒子系统 ---
+    class Particle {
+        constructor(x, y, color) {
+            // 原始坐标（归一化保存，方便缩放）
+            this.baseX = x; 
+            this.baseY = y;
+            // 实际显示坐标
+            this.x = Math.random() * pCanvas.width;
+            this.y = Math.random() * pCanvas.height;
+            this.color = color;
+            this.size = Math.random() * 2 + 1;
+            this.vx = 0;
+            this.vy = 0;
+            this.friction = 0.9;
+            this.ease = 0.15;
+        }
+
+        update() {
+            // 1. 处理缩放 (Lerp 插值实现平滑缩放)
+            // 将图案中心定在屏幕中心
+            const centerX = pCanvas.width / 2;
+            const centerY = pCanvas.height / 2;
+            
+            // 计算当前粒子应该在的目标位置 (基于缩放)
+            const targetX = (this.baseX - centerX) * handState.scale + centerX;
+            const targetY = (this.baseY - centerY) * handState.scale + centerY;
+
+            // 2. 物理交互 (食指拨动)
+            if (handState.active) {
+                const dx = handState.x - this.x;
+                const dy = handState.y - this.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                
+                if (dist < 80) { // 感应半径
+                    const angle = Math.atan2(dy, dx);
+                    const force = (80 - dist) / 80;
+                    const power = 25; // 斥力大小
+                    
+                    this.vx -= Math.cos(angle) * force * power;
+                    this.vy -= Math.sin(angle) * force * power;
+                }
+            }
+
+            // 3. 回归逻辑
+            this.vx += (targetX - this.x) * this.ease;
+            this.vy += (targetY - this.y) * this.ease;
+
+            this.vx *= this.friction;
+            this.vy *= this.friction;
+
+            this.x += this.vx;
+            this.y += this.vy;
+        }
+
+        draw() {
+            pCtx.fillStyle = this.color;
+            pCtx.fillRect(this.x, this.y, this.size, this.size);
+        }
+    }
+
+    // 图案生成逻辑 (扫描)
+    function scanPattern(sourceCtx, w, h) {
+        particles = [];
+        const data = sourceCtx.getImageData(0, 0, w, h).data;
+        for(let y=0; y<h; y+=gap) {
+            for(let x=0; x<w; x+=gap) {
+                const i = (y*w+x)*4;
+                if(data[i+3] > 128) {
+                    const r = data[i]; const g = data[i+1]; const b = data[i+2];
+                    particles.push(new Particle(x, y, `rgba(${r},${g},${b},0.9)`));
+                }
+            }
+        }
+    }
+
+    // 设置图案
+    function setPattern(type) {
+        const tC = document.createElement('canvas');
+        tC.width = pCanvas.width; tC.height = pCanvas.height;
+        const tCtx = tC.getContext('2d');
+
+        if(type === 'text') {
+            tCtx.fillStyle = '#00ffff';
+            tCtx.font = 'bold 20vw Arial';
+            tCtx.textAlign = 'center'; tCtx.textBaseline = 'middle';
+            tCtx.fillText('HAND', pCanvas.width/2, pCanvas.height/2);
+        } else if (type === 'heart') {
+            tCtx.fillStyle = '#ff3838';
+            tCtx.translate(pCanvas.width/2, pCanvas.height/2);
+            const s = Math.min(pCanvas.width, pCanvas.height)/35;
+            tCtx.beginPath();
+            for(let i=0; i<=Math.PI*2; i+=0.05){
+                const x = 16*Math.pow(Math.sin(i),3);
+                const y = -(13*Math.cos(i)-5*Math.cos(2*i)-2*Math.cos(3*i)-Math.cos(4*i));
+                tCtx.lineTo(x*s, y*s);
+            }
+            tCtx.fill();
+        }
+        scanPattern(tCtx, pCanvas.width, pCanvas.height);
+    }
+
+    // 导入图片
+    document.getElementById('imgUpload').addEventListener('change', (e) => {
+        const f = e.target.files[0];
+        if(f) {
+            const r = new FileReader();
+            r.onload = (ev) => {
+                const img = new Image();
+                img.onload = () => {
+                    const tC = document.createElement('canvas');
+                    tC.width = pCanvas.width; tC.height = pCanvas.height;
+                    const tCtx = tC.getContext('2d');
+                    const scale = Math.min(pCanvas.width/img.width, pCanvas.height/img.height)*0.6;
+                    const w = img.width*scale; const h = img.height*scale;
+                    tCtx.drawImage(img, (pCanvas.width-w)/2, (pCanvas.height-h)/2, w, h);
+                    scanPattern(tCtx, pCanvas.width, pCanvas.height);
+                }
+                img.src = ev.target.result;
+            }
+            r.readAsDataURL(f);
+        }
+    });
+
+    // --- 动画循环 ---
+    function animate() {
+        pCtx.clearRect(0, 0, pCanvas.width, pCanvas.height);
+
+        // 平滑过渡缩放值
+        handState.scale += (handState.targetScale - handState.scale) * 0.1;
+
+        particles.forEach(p => {
+            p.update();
+            p.draw();
+        });
+
+        // 绘制食指高亮圈 (仅当检测到且处于交互模式时)
+        if (handState.active) {
+            pCtx.beginPath();
+            pCtx.arc(handState.x, handState.y, 20, 0, Math.PI*2);
+            pCtx.strokeStyle = 'white';
+            pCtx.lineWidth = 3;
+            pCtx.stroke();
+            
+            // 显示当前手势状态文字
+            pCtx.fillStyle = 'white';
+            pCtx.font = '16px Arial';
+            let txt = "✋ 正常";
+            if (handState.targetScale > 1.2) txt = "🖐 张开 (放大)";
+            if (handState.targetScale < 0.8) txt = "✊ 握拳 (缩小)";
+            pCtx.fillText(txt, handState.x + 30, handState.y);
+        }
+
+        requestAnimationFrame(animate);
+    }
+
+    // --- 事件绑定 ---
+    document.getElementById('startBtn').addEventListener('click', startCamera);
+    
+    document.getElementById('switchCamBtn').addEventListener('click', () => {
+        currentFacingMode = currentFacingMode === 'user' ? 'environment' : 'user';
+        // 如果摄像头正在运行，需要重启以应用切换
+        if (isCameraRunning) {
+            startCamera();
+        }
+    });
+
+    // 初始化
+    setPattern('text');
+    animate();
+
+</script>
+</body>
+</html>

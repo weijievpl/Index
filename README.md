@@ -1,76 +1,79 @@
 # 🥤 ColaCero
 
-**ColaCero** 是一个面向高效运营与实时交互的智能排队与流程管理系统。  
-它通过结构化流程、实时状态同步和多端交互，帮助商家与用户实现更流畅、更透明的服务体验。
+**ColaCero** es un sistema inteligente de gestión de colas y flujos en tiempo real, diseñado para optimizar la eficiencia operativa y mejorar la experiencia del usuario.
+
+No es solo una herramienta de “turnos”, sino una plataforma que combina lógica de procesos, sincronización en tiempo real y diseño centrado en la experiencia.
 
 ---
 
-## ✨ 核心理念
+## ✨ Filosofía
 
-> 更少等待，更高效率，更好的体验
+> Menos espera, más eficiencia, mejor experiencia
 
-ColaCero 不只是一个“排队工具”，而是一个：
+ColaCero transforma la espera en un proceso:
 
-- 🧠 流程驱动系统
-- ⚡ 实时状态引擎
-- 🎯 用户体验优化层
-
----
-
-## 🚀 核心功能
-
-### 🎟️ 排队与票号系统
-- 自动生成队列票号
-- 实时更新排队进度
-- 支持恢复票号（找回机制）
-- no-show 自动处理机制
+- 🧠 estructurado  
+- ⚡ dinámico  
+- 🎯 predecible  
 
 ---
 
-### 📊 实时状态面板
-- 当前服务状态展示
-- 等待时间预测（置信度机制）
-- 队列动态变化实时同步
+## 🚀 Funcionalidades principales
+
+### 🎟️ Sistema de turnos
+- Generación automática de tickets
+- Actualización en tiempo real del estado de la cola
+- Recuperación de turno (sistema de reanudación)
+- Gestión automática de *no-show*
 
 ---
 
-### 🔍 智能搜索与操作
-- 快速查找票号
-- 快捷操作（跳转 / 修改状态）
-- 后台快速管理入口
+### 📊 Panel de estado en tiempo real
+- Visualización del estado actual
+- Estimación del tiempo de espera
+- Indicador de confianza en la predicción
+- Cambios dinámicos en la cola
 
 ---
 
-### 📱 多端交互体验
-- 用户端：查看进度、接收通知
-- 商家端：管理队列与状态
-- 支持二维码快速进入队列
+### 🔍 Búsqueda y acciones rápidas
+- Búsqueda instantánea de turnos
+- Acciones rápidas (saltar, modificar estado)
+- Acceso rápido al panel de administración
 
 ---
 
-### ⚡ 性能与流畅度优化
-- 弱网环境自动降级
-- 局部更新（避免全量刷新）
-- 延迟优化与状态缓存
+### 📱 Experiencia multi-dispositivo
+- Usuario: consulta estado y progreso
+- Operador: gestión de la cola
+- Acceso mediante código QR
 
 ---
 
-### 🧩 可扩展能力
-- 模块化结构设计
-- 支持自定义流程
-- 易接入 AI / 自动化系统
+### ⚡ Optimización de rendimiento
+- Modo degradado en redes lentas
+- Actualización parcial (sin recargar toda la UI)
+- Reducción de latencia
+- Caché de estado
 
 ---
 
-## 🏗️ 系统结构（概念）
+### 🧩 Extensibilidad
+- Arquitectura modular
+- Flujos personalizables
+- Integración con sistemas externos y AI
+
+---
+
+## 🏗️ Arquitectura conceptual
 
 ```text
-用户端
+Usuario
    ↓
-交互层（UI / 状态展示）
+Capa de interacción (UI)
    ↓
-实时状态引擎（Queue Engine）
+Motor en tiempo real (Queue Engine)
    ↓
-数据层（票号 / 队列 / 日志）
+Capa de datos (tickets / cola / logs)
    ↓
-管理后台（操作 / 控制 / 审计）
+Panel de administración
